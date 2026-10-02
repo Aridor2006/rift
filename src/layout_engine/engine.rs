@@ -2,9 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use rift_protocol::{
-    DirectionalDistance, FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions,
-};
+use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -965,7 +963,7 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         space: SpaceId,
         visible_spaces: &[SpaceId],
-        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+        visible_space_frames: &HashMap<SpaceId, CGRect>,
         direction: Direction,
         is_floating: bool,
     ) -> EventResponse {
@@ -1099,7 +1097,7 @@ impl LayoutEngine {
                 space,
                 direction,
                 visible_spaces,
-                visible_space_centers,
+                visible_space_frames,
             ) {
                 let Some((new_ws_id, new_layout)) =
                     self.workspaces.active_layout_for_space(new_space)
@@ -1188,37 +1186,48 @@ impl LayoutEngine {
         current_space: SpaceId,
         direction: Direction,
         visible_spaces: &[SpaceId],
-        space_centers: &HashMap<SpaceId, CGPoint>,
+        space_frames: &HashMap<SpaceId, CGRect>,
     ) -> Option<SpaceId> {
         if visible_spaces.len() <= 1 {
             return None;
         }
 
-        let current_center = space_centers.get(&current_space)?;
+        // A display lies in `direction` only if it sits entirely beyond the
+        // current display's edge on that side (small tolerance for rounding),
+        // so a bottom-aligned display beside this one is not "down". Nearest
+        // edge wins; ties go to the smallest perpendicular offset.
+        const EDGE_TOLERANCE: f64 = 2.0;
+        let current = space_frames.get(&current_space)?;
+        let (cur_min, cur_max, cur_mid) = (current.min(), current.max(), current.mid());
         let mut candidates = Vec::new();
         for &candidate_space in visible_spaces {
             if candidate_space == current_space {
                 continue;
             }
-            if let Some(candidate_center) = space_centers.get(&candidate_space) {
-                if let Some(delta) = (current_center.x, current_center.y)
-                    .distance_in_direction((candidate_center.x, candidate_center.y), direction)
-                    .filter(|distance| *distance > 0.0)
-                {
-                    candidates.push((candidate_space, delta));
-                }
+            let Some(candidate) = space_frames.get(&candidate_space) else {
+                continue;
+            };
+            let (min, max, mid) = (candidate.min(), candidate.max(), candidate.mid());
+            let (gap, perpendicular) = match direction {
+                Direction::Left => (cur_min.x - max.x, (mid.y - cur_mid.y).abs()),
+                Direction::Right => (min.x - cur_max.x, (mid.y - cur_mid.y).abs()),
+                Direction::Up => (cur_min.y - max.y, (mid.x - cur_mid.x).abs()),
+                Direction::Down => (min.y - cur_max.y, (mid.x - cur_mid.x).abs()),
+            };
+            if gap >= -EDGE_TOLERANCE {
+                candidates.push((candidate_space, gap.max(0.0), perpendicular));
             }
         }
 
-        if !candidates.is_empty() {
-            candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-            return Some(candidates[0].0);
-        }
-
+        candidates.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(Ordering::Equal)
+                .then(a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal))
+        });
         // No display further in this direction: stop at the edge instead of
         // wrapping around to the opposite side (was: Left/Right fell back to
         // the last/first visible space).
-        None
+        candidates.first().map(|candidate| candidate.0)
     }
 
     fn remove_window_internal(
@@ -1909,7 +1918,7 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         space: Option<SpaceId>,
         visible_spaces: &[SpaceId],
-        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+        visible_space_frames: &HashMap<SpaceId, CGRect>,
         command: LayoutCommand,
     ) -> EventResponse {
         if !matches!(command, LayoutCommand::ScrollStrip { .. }) {
@@ -1980,7 +1989,7 @@ impl LayoutEngine {
                         self.workspaces[ws_id].layout_system.remove_window(wid);
                         if options != ToggleWindowFloatingOptions::default()
                             && let (Some(center), Some(size), Some(current)) = (
-                                visible_space_centers.get(&space),
+                                visible_space_frames.get(&space).map(|frame| frame.mid()),
                                 self.workspaces[ws_id].layout_state.active_size(),
                                 window_store.window(wid).map(|window| window.frame_monotonic),
                             )
@@ -2176,7 +2185,7 @@ impl LayoutEngine {
                     window_store,
                     space,
                     visible_spaces,
-                    visible_space_centers,
+                    visible_space_frames,
                     direction,
                     is_floating,
                 );
@@ -2199,7 +2208,7 @@ impl LayoutEngine {
                         space,
                         direction,
                         visible_spaces,
-                        visible_space_centers,
+                        visible_space_frames,
                     ) {
                         let Some((new_ws_id, new_layout)) =
                             self.workspaces.active_layout_for_space(new_space)
@@ -3564,23 +3573,24 @@ mod tests {
         );
     }
 
-    fn build_three_spaces() -> (
-        Vec<SpaceId>,
-        HashMap<SpaceId, CGPoint>,
-        SpaceId,
-        SpaceId,
-        SpaceId,
-    ) {
+    fn build_three_spaces() -> (Vec<SpaceId>, HashMap<SpaceId, CGRect>, SpaceId, SpaceId, SpaceId) {
         let left = SpaceId::new(1);
         let right = SpaceId::new(2);
         let middle = SpaceId::new(3);
 
         let mut centers = HashMap::default();
-        centers.insert(left, CGPoint::new(0.0, 0.0));
-        centers.insert(right, CGPoint::new(4000.0, 0.0));
-        centers.insert(middle, CGPoint::new(2000.0, 0.0));
+        centers.insert(left, display_at(0.0, 0.0));
+        centers.insert(right, display_at(4000.0, 0.0));
+        centers.insert(middle, display_at(2000.0, 0.0));
 
         (vec![left, right, middle], centers, left, middle, right)
+    }
+
+    fn display_at(center_x: f64, center_y: f64) -> CGRect {
+        CGRect::new(
+            CGPoint::new(center_x - 960.0, center_y - 540.0),
+            CGSize::new(1920.0, 1080.0),
+        )
     }
 
     #[test]
@@ -3613,9 +3623,9 @@ mod tests {
         let upper = SpaceId::new(4);
         let lower = SpaceId::new(5);
         let mut vertical_centers = HashMap::default();
-        vertical_centers.insert(upper, CGPoint::new(960.0, -1080.0));
-        vertical_centers.insert(middle, CGPoint::new(960.0, 0.0));
-        vertical_centers.insert(lower, CGPoint::new(960.0, 1080.0));
+        vertical_centers.insert(upper, display_at(960.0, -1080.0));
+        vertical_centers.insert(middle, display_at(960.0, 0.0));
+        vertical_centers.insert(lower, display_at(960.0, 1080.0));
         let vertical_spaces = vec![lower, middle, upper];
         assert_eq!(
             engine.next_space_for_direction(
@@ -3635,6 +3645,28 @@ mod tests {
             ),
             Some(lower)
         );
+
+        // Smaller display to the left, bottom-aligned: not "down".
+        let big = SpaceId::new(6);
+        let laptop = SpaceId::new(7);
+        let mut offset_centers = HashMap::default();
+        offset_centers.insert(
+            big,
+            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(2560.0, 1440.0)),
+        );
+        offset_centers.insert(
+            laptop,
+            CGRect::new(CGPoint::new(-1512.0, 458.0), CGSize::new(1512.0, 982.0)),
+        );
+        let offset_spaces = vec![laptop, big];
+        assert_eq!(
+            engine.next_space_for_direction(big, Direction::Down, &offset_spaces, &offset_centers),
+            None
+        );
+        assert_eq!(
+            engine.next_space_for_direction(big, Direction::Left, &offset_spaces, &offset_centers),
+            Some(laptop)
+        );
     }
 
     #[test]
@@ -3643,14 +3675,14 @@ mod tests {
         let mut engine = test_engine();
         let space = SpaceId::new(42);
         let visible_spaces = vec![space];
-        let visible_space_centers = HashMap::default();
+        let visible_space_frames = HashMap::default();
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             engine.handle_command(
                 &mut window_store,
                 Some(space),
                 &visible_spaces,
-                &visible_space_centers,
+                &visible_space_frames,
                 LayoutCommand::NextWindow,
             )
         }));
@@ -3877,7 +3909,7 @@ mod tests {
         let space_b = SpaceId::new(202);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
         let visible_spaces = vec![space_a, space_b];
-        let visible_space_centers = HashMap::default();
+        let visible_space_frames = HashMap::default();
         let window_a = WindowId::new(1, 1);
         let window_b = WindowId::new(1, 2);
         let window_c = WindowId::new(2, 1);
@@ -3900,7 +3932,7 @@ mod tests {
             &mut window_store,
             Some(space_a),
             &visible_spaces,
-            &visible_space_centers,
+            &visible_space_frames,
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
         );
 
@@ -4100,9 +4132,9 @@ mod tests {
         let adjacent_space = SpaceId::new(51);
         let screen_size = CGSize::new(1920.0, 1080.0);
         let visible_spaces = vec![current_space, adjacent_space];
-        let mut visible_space_centers = HashMap::default();
-        visible_space_centers.insert(current_space, CGPoint::new(0.0, 0.0));
-        visible_space_centers.insert(adjacent_space, CGPoint::new(1920.0, 0.0));
+        let mut visible_space_frames = HashMap::default();
+        visible_space_frames.insert(current_space, display_at(0.0, 0.0));
+        visible_space_frames.insert(adjacent_space, display_at(1920.0, 0.0));
 
         let _ = engine.handle_event(
             &mut window_store,
@@ -4114,7 +4146,7 @@ mod tests {
                 &mut window_store,
                 Some(current_space),
                 &visible_spaces,
-                &visible_space_centers,
+                &visible_space_frames,
                 LayoutCommand::MoveFocus(Direction::Right),
             )
         }));
@@ -4207,19 +4239,76 @@ mod tests {
         );
 
         let visible_spaces = vec![current_space, upper_space];
-        let mut visible_space_centers = HashMap::default();
-        visible_space_centers.insert(current_space, CGPoint::new(960.0, 540.0));
-        visible_space_centers.insert(upper_space, CGPoint::new(960.0, -540.0));
+        let mut visible_space_frames = HashMap::default();
+        visible_space_frames.insert(current_space, display_at(960.0, 540.0));
+        visible_space_frames.insert(upper_space, display_at(960.0, -540.0));
 
         let response = engine.handle_command(
             &mut window_store,
             Some(current_space),
             &visible_spaces,
-            &visible_space_centers,
+            &visible_space_frames,
             LayoutCommand::MoveFocus(Direction::Up),
         );
 
         assert_eq!(response.focus_window, Some(upper_window));
+    }
+
+    fn cross_display_focus(count: u32, from_big: bool, direction: Direction) -> Option<WindowId> {
+        let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
+        let big = SpaceId::new(70);
+        let laptop = SpaceId::new(71);
+        let big_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(2560.0, 1440.0));
+        let laptop_frame = CGRect::new(CGPoint::new(-1512.0, 458.0), CGSize::new(1512.0, 982.0));
+        let window_info = |wid| window_layout_info(wid, CGSize::new(0.0, 0.0));
+        for (space, frame) in [(big, big_frame), (laptop, laptop_frame)] {
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, frame.size));
+            let windows: Vec<_> =
+                (1..=count).map(|i| window_info(WindowId::new(space.get() as i32, i))).collect();
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(space, space.get() as i32, windows, None),
+            );
+        }
+        let space = if from_big { big } else { laptop };
+        let edge = if matches!(direction, Direction::Left) {
+            1
+        } else {
+            count
+        };
+        let focused = WindowId::new(space.get() as i32, edge);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, focused));
+        let visible_spaces = vec![laptop, big];
+        let mut frames = HashMap::default();
+        frames.insert(big, big_frame);
+        frames.insert(laptop, laptop_frame);
+        engine
+            .handle_command(
+                &mut window_store,
+                Some(space),
+                &visible_spaces,
+                &frames,
+                LayoutCommand::MoveFocus(direction),
+            )
+            .focus_window
+    }
+
+    #[test]
+    fn cross_display_focus_left() {
+        for count in [1, 2] {
+            let focus = cross_display_focus(count, true, Direction::Left);
+            assert_eq!(focus.map(|w| w.pid), Some(71), "count={count} {focus:?}");
+        }
+    }
+
+    #[test]
+    fn cross_display_focus_right() {
+        for count in [1, 2] {
+            let focus = cross_display_focus(count, false, Direction::Right);
+            assert_eq!(focus.map(|w| w.pid), Some(70), "count={count} {focus:?}");
+        }
     }
 
     #[test]
