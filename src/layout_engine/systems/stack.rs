@@ -248,6 +248,11 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
+    fn add_window_at_edge(&mut self, layout: LayoutId, wid: WindowId, edge: Direction) {
+        self.inner.add_window_at_edge(layout, wid, edge);
+        self.normalize_layout(layout);
+    }
+
     fn move_selection_hits_layout_edge(&self, layout: LayoutId, direction: Direction) -> bool {
         self.inner.move_selection_hits_layout_edge(layout, direction)
     }

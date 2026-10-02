@@ -797,6 +797,24 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.select(node);
     }
 
+    fn add_window_at_edge(&mut self, layout: LayoutId, wid: WindowId, edge: Direction) {
+        let root = self.root(layout);
+        if root.first_child(self.map()).is_some()
+            && self.layout(root).orientation() != edge.orientation()
+        {
+            self.nest_in_container_internal(layout, root, LayoutKind::from(edge.orientation()));
+        }
+        let root = self.root(layout);
+        let node = match (edge, root.first_child(self.map())) {
+            (Direction::Left | Direction::Up, Some(first)) => {
+                self.tree.mk_node().insert_before(first)
+            }
+            _ => self.tree.mk_node().push_back(root),
+        };
+        self.tree.data.window.set_window(layout, node, wid);
+        self.select(node);
+    }
+
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
         self.tree.data.window.replace_window(from, to);
     }
