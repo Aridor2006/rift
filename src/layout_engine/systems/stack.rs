@@ -248,6 +248,10 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
+    fn move_selection_hits_layout_edge(&self, layout: LayoutId, direction: Direction) -> bool {
+        self.inner.move_selection_hits_layout_edge(layout, direction)
+    }
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let moved = self.inner.move_selection(layout, direction);
         if moved {

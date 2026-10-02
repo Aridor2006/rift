@@ -1160,6 +1160,23 @@ impl LayoutSystem for TraditionalLayoutSystem {
         vec![]
     }
 
+    fn move_selection_hits_layout_edge(&self, layout: LayoutId, direction: Direction) -> bool {
+        // Mirrors move_node_inner: true when the move would fall through to
+        // nesting the layout root.
+        let selection = self.selection(layout);
+        let map = self.map();
+        if self.move_over(selection, direction).is_some() {
+            return false;
+        }
+        let has_target_ancestor =
+            selection.ancestors_with_parent(map).skip(1).any(|(_node, parent)| {
+                parent
+                    .map(|p| self.layout(p).orientation() == direction.orientation())
+                    .unwrap_or(false)
+            });
+        !has_target_ancestor
+    }
+
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         let selection = self.selection(layout);
 

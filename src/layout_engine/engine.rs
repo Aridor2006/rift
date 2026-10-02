@@ -2203,13 +2203,24 @@ impl LayoutEngine {
             }
             LayoutCommand::MoveNode(direction) => {
                 self.workspaces[workspace_id].layout_state.last_saved = Some(layout);
-                if !self.workspaces[workspace_id].layout_system.move_selection(layout, direction) {
-                    if let Some(new_space) = self.next_space_for_direction(
-                        space,
-                        direction,
-                        visible_spaces,
-                        visible_space_frames,
-                    ) {
+                let next_space = self.next_space_for_direction(
+                    space,
+                    direction,
+                    visible_spaces,
+                    visible_space_frames,
+                );
+                // With a display in this direction, a window at the layout's
+                // edge crosses to it instead of re-nesting the root here.
+                let cross_first = next_space.is_some()
+                    && self.workspaces[workspace_id]
+                        .layout_system
+                        .move_selection_hits_layout_edge(layout, direction);
+                if cross_first
+                    || !self.workspaces[workspace_id]
+                        .layout_system
+                        .move_selection(layout, direction)
+                {
+                    if let Some(new_space) = next_space {
                         let Some((new_ws_id, new_layout)) =
                             self.workspaces.active_layout_for_space(new_space)
                         else {
@@ -4309,6 +4320,94 @@ mod tests {
             let focus = cross_display_focus(count, false, Direction::Right);
             assert_eq!(focus.map(|w| w.pid), Some(70), "count={count} {focus:?}");
         }
+    }
+
+    /// Big monitor with a bottom-aligned laptop to its left; `count` windows
+    /// on each display. Moves the focused window of `from` in `direction`
+    /// and returns the space that holds it afterwards.
+    fn cross_display_move(count: u32, from_big: bool, direction: Direction) -> Option<SpaceId> {
+        let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
+        let big = SpaceId::new(70);
+        let laptop = SpaceId::new(71);
+        let big_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(2560.0, 1440.0));
+        let laptop_frame = CGRect::new(CGPoint::new(-1512.0, 458.0), CGSize::new(1512.0, 982.0));
+        let window_info = |wid| window_layout_info(wid, CGSize::new(0.0, 0.0));
+        for (space, frame) in [(big, big_frame), (laptop, laptop_frame)] {
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, frame.size));
+            let windows: Vec<_> =
+                (1..=count).map(|i| window_info(WindowId::new(space.get() as i32, i))).collect();
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(space, space.get() as i32, windows, None),
+            );
+        }
+        let (space, other) = if from_big {
+            (big, laptop)
+        } else {
+            (laptop, big)
+        };
+        // Focus the window nearest the other display.
+        let edge = if matches!(direction, Direction::Left) {
+            1
+        } else {
+            count
+        };
+        let moving = WindowId::new(space.get() as i32, edge);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, moving));
+
+        let visible_spaces = vec![laptop, big];
+        let mut frames = HashMap::default();
+        frames.insert(big, big_frame);
+        frames.insert(laptop, laptop_frame);
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &visible_spaces,
+            &frames,
+            LayoutCommand::MoveNode(direction),
+        );
+        [space, other].into_iter().find(|&candidate| {
+            engine
+                .workspaces
+                .active_layout_for_space(candidate)
+                .is_some_and(|(ws, layout)| {
+                    engine.workspaces[ws].layout_system.contains_window(layout, moving)
+                })
+        })
+    }
+
+    #[test]
+    fn cross_display_move_left_one_window() {
+        assert_eq!(
+            cross_display_move(1, true, Direction::Left),
+            Some(SpaceId::new(71))
+        );
+    }
+
+    #[test]
+    fn cross_display_move_left_two_windows() {
+        assert_eq!(
+            cross_display_move(2, true, Direction::Left),
+            Some(SpaceId::new(71))
+        );
+    }
+
+    #[test]
+    fn cross_display_move_right_one_window() {
+        assert_eq!(
+            cross_display_move(1, false, Direction::Right),
+            Some(SpaceId::new(70))
+        );
+    }
+
+    #[test]
+    fn cross_display_move_right_two_windows() {
+        assert_eq!(
+            cross_display_move(2, false, Direction::Right),
+            Some(SpaceId::new(70))
+        );
     }
 
     #[test]
