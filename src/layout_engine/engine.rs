@@ -2209,7 +2209,7 @@ impl LayoutEngine {
                         let windows = self.workspaces[workspace_id]
                             .layout_system
                             .visible_windows_under_selection(layout);
-                        for wid in windows {
+                        for (i, wid) in windows.into_iter().enumerate() {
                             self.workspaces[workspace_id].layout_system.remove_window(wid);
                             if matches!(
                                 self.workspaces[new_ws_id].layout_system,
@@ -2218,9 +2218,14 @@ impl LayoutEngine {
                             {
                                 self.preserve_scrolling_window_width(window_store, wid);
                             }
-                            self.workspaces[new_ws_id]
-                                .layout_system
-                                .add_window_after_selection(new_layout, wid);
+                            // Enter at the side facing the source display; the rest
+                            // follow the first in order.
+                            let target = &mut self.workspaces[new_ws_id].layout_system;
+                            if i == 0 {
+                                target.add_window_at_edge(new_layout, wid, direction.opposite());
+                            } else {
+                                target.add_window_after_selection(new_layout, wid);
+                            }
                             self.workspaces.assign_window_to_workspace(
                                 window_store,
                                 new_space,
@@ -4331,6 +4336,74 @@ mod tests {
             cross_display_move(2, false, Direction::Right),
             Some(SpaceId::new(70))
         );
+    }
+
+    /// Windows of `space` in layout order after moving across displays.
+    fn cross_display_move_order(from_big: bool, direction: Direction) -> Vec<WindowId> {
+        let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
+        let big = SpaceId::new(70);
+        let laptop = SpaceId::new(71);
+        let big_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(2560.0, 1440.0));
+        let laptop_frame = CGRect::new(CGPoint::new(-1512.0, 458.0), CGSize::new(1512.0, 982.0));
+        let window_info = |wid| window_layout_info(wid, CGSize::new(0.0, 0.0));
+        for (space, frame) in [(big, big_frame), (laptop, laptop_frame)] {
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, frame.size));
+            let windows: Vec<_> =
+                (1..=2).map(|i| window_info(WindowId::new(space.get() as i32, i))).collect();
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(space, space.get() as i32, windows, None),
+            );
+        }
+        let (space, other) = if from_big {
+            (big, laptop)
+        } else {
+            (laptop, big)
+        };
+        // Target display's selection sits on the far side from the source.
+        let far = if matches!(direction, Direction::Left) {
+            1
+        } else {
+            2
+        };
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(other, WindowId::new(other.get() as i32, far)),
+        );
+        let edge = if matches!(direction, Direction::Left) {
+            1
+        } else {
+            2
+        };
+        let moving = WindowId::new(space.get() as i32, edge);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, moving));
+        let visible_spaces = vec![laptop, big];
+        let mut frames = HashMap::default();
+        frames.insert(big, big_frame);
+        frames.insert(laptop, laptop_frame);
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &visible_spaces,
+            &frames,
+            LayoutCommand::MoveNode(direction),
+        );
+        let (ws, layout) = engine.workspaces.active_layout_for_space(other).unwrap();
+        engine.workspaces[ws].layout_system.visible_windows_in_layout(layout)
+    }
+
+    #[test]
+    fn cross_display_move_left_enters_right_edge() {
+        let order = cross_display_move_order(true, Direction::Left);
+        assert_eq!(order.last(), Some(&WindowId::new(70, 1)), "{order:?}");
+    }
+
+    #[test]
+    fn cross_display_move_right_enters_left_edge() {
+        let order = cross_display_move_order(false, Direction::Right);
+        assert_eq!(order.first(), Some(&WindowId::new(71, 2)), "{order:?}");
     }
 
     #[test]
