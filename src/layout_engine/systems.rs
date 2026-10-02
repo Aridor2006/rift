@@ -263,6 +263,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         Vec::new()
     }
     fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+    /// Whether moving the selection would only re-nest the layout root (no
+    /// sibling or ancestor to pass), so the engine can prefer crossing to an
+    /// adjacent display.
+    fn move_selection_hits_layout_edge(&self, _layout: LayoutId, _direction: Direction) -> bool {
+        false
+    }
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
     fn resize_selection_by(
         &mut self,
