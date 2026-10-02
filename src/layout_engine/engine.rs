@@ -1215,15 +1215,10 @@ impl LayoutEngine {
             return Some(candidates[0].0);
         }
 
-        match direction {
-            Direction::Left => {
-                visible_spaces.iter().rev().copied().find(|&space| space != current_space)
-            }
-            Direction::Right => {
-                visible_spaces.iter().copied().find(|&space| space != current_space)
-            }
-            Direction::Up | Direction::Down => None,
-        }
+        // No display further in this direction: stop at the edge instead of
+        // wrapping around to the opposite side (was: Left/Right fell back to
+        // the last/first visible space).
+        None
     }
 
     fn remove_window_internal(
@@ -3564,6 +3559,15 @@ mod tests {
         );
         assert_eq!(
             engine.next_space_for_direction(middle, Direction::Up, &visible_spaces, &centers),
+            None
+        );
+        // No display further left/right: stop instead of wrapping around.
+        assert_eq!(
+            engine.next_space_for_direction(left, Direction::Left, &visible_spaces, &centers),
+            None
+        );
+        assert_eq!(
+            engine.next_space_for_direction(right, Direction::Right, &visible_spaces, &centers),
             None
         );
 
